@@ -76,9 +76,33 @@ class S2T:
   def forward(self, input_features, decoder_input_ids, attention_mask):
     # returns next logits given passed preceding, of shape [batch, sequence, vocab]
     return self.model(input_features, decoder_input_ids=decoder_input_ids, return_dict=True, attention_mask=attention_mask).logits
-  def __enter__(self):
-    # quick training loop?
-    optimizer = torch.optim.SGD(lr=0.0001)
+  def __enter__(self, num_training_steps, num_warmup_steps = 1000, lr = 0.0001, last_epoch = -1, train_encoder_inputs = False):
+    # DRAFT quick training loop?
+    self.model.train()
+    params = {**self.model.named_parameters()}
+    if train_encoder_inputs:
+        self.processor.train()
+        self.processor.zero_grad()
+        params.update(self.processor.named_parameters())
+    #optimizer = torch.optim.SGD(lr=0.0001)
+    # weight decay could be 0.1 or 0.01
+    optimizer = torch.optim.AdamW(lr=lr, weight_decay=0)
+    # warmup steps: 175-16000
+    lrschedule = transformers.optimizer.get_cosine_schedule_with_warmup(optimizer, num_warmup_steps = num_warmup_steps, num_training_steps = num_training_steps, last_epoch = last_epoch)
+    self.model.zero_grad()
+    return lrschedule
+  def backward(self, lrschedule, loss):
+    # DRAFT quick training loop?
+    #loss.backward()
+    lrschedule.optimizer.backward(loss)
+    lrschedule.optimizer.step()
+    lrschedule.step()
+    self.model.zero_grad()
+    self.processor.zero_grad()
+  def __exit__(self, *params):
+    # DRAFT quick training loop?
+    self.model.eval()
+    self.processor.eval()
   def generate(self, input_features, attention_mask):
     print('passing data thru model ...')
     input_ids = torch.full((input_features.shape[0], 1), self.model.config.decoder_start_token_id)
@@ -119,43 +143,9 @@ if __name__ == '__main__':
     for fn in sys.argv[1:]:
         data = Data(src = fn)
         processed = []
-        for larger_chunk in range(0, data.length - data.chunk_duration(), data.chunksize * 1024):
+        #for larger_chunk in range(0, data.length - data.chunk_duration(), data.chunksize * 1024):
         for offset in range(0, data.length - data.chunk_duration(), data.length / 3):
             feature_ids, attention_mask = s2t_vanilla.tokenize(data.read_chunks(1)[0])
         generated_ids = s2t_vanilla.generate(feature_ids, attention_mask)
         outputs = s2t_vanilla.detokenize(generated_ids)
         print(outputs)
-
-        # stitching doesn't seem that nice
-        # but it is notable that we have basically a bunch of set feature ids
-        # it then processes the feature ids in a set chunk size
-        # so basically we would read from only the middle, and stitch that part together
-        # we have a stream of feature_ids.
-        # we produce more generated_ids than we use
-        # and we stitch the generated_ids.
-        ### missing: where to stitch them.
-        # [ first block of feature ids]
-        #       [second block of feature ids]
-        #           [interesting ]
-        # thinking of processing the area described interesting
-        # after reading 2 overlapping blocks, there are overlapping
-        # generated ids output. we want the generated ids that are
-        # the same.
-        # another approach would be to add the logits, if knew where
-        # they lined up.
-        # produce generated ids, slide window, produce more generated ids
-        # how find identical range?
-        ### mm i guess you'd put it into a slid matrix and find the row with the most equality
-        # could do that with logits too. find the biggest product e.g.
-
-        # ok so logits from one, logits from another
-        ### we did not actually figure streaming out. misleadingness.
-        ### it turns out the model is more complex than imagined.
-        ### inside model, it may turn out that it is not hard.
-        ### but would need to understand inside of model to do not-hard way.
-        ## we might be able to infer some of that if we assume it's a transformer encoder feeding partway into a transformer decoder that takes the input ids, trained on example sequences that do not chain.
-        ## although it may have been trained on chaining examples.
-
-        #### we could do a quick + simple streaming but the performance
-        #### of the model would reduce. it would make more sense to
-        #### do the cross-correlationish-thing.
